@@ -197,7 +197,7 @@ jobs:
       - name: Rechunk image for resumable updates
         shell: bash
         run: |
-          sudo -E just ostree-rechunk \
+          sudo -E $(command -v just) ostree-rechunk \
             "${IMAGE_NAME}" \
             "${DEFAULT_TAG}"
 
