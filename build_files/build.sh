@@ -32,12 +32,16 @@ dnf5 install -y \
     libjpeg8 \
     libjpeg-turbo
 
+# Native KVM/QEMU/libvirt/virt-manager virtualization stack.
+dnf5 group install -y virtualization
+
 # Do not leave the temporary compatibility COPR enabled in the final system.
 dnf5 -y copr disable aflyhorse/libjpeg
 
 # Enable normal system services. Do not select Gaze's global authselect profile.
 systemctl enable gazed.service
 systemctl enable cups.service
+systemctl enable libvirtd.service
 
 # Ensure copied executable vendor filters remain executable.
 find /usr/lib/cups/filter -maxdepth 1 -type f -name 'pt*' \
