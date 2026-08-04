@@ -41,7 +41,6 @@ dnf5 -y copr disable aflyhorse/libjpeg
 # Enable normal system services. Do not select Gaze's global authselect profile.
 systemctl enable gazed.service
 systemctl enable cups.service
-systemctl enable libvirtd.service
 
 # Ensure copied executable vendor filters remain executable.
 find /usr/lib/cups/filter -maxdepth 1 -type f -name 'pt*' \
