@@ -1,28 +1,150 @@
 ---
-name: Build container image
+name: Build signed family Bazzite image
+
 on:
   pull_request:
     branches:
       - main
-  schedule:
-    - cron: '05 10 * * *'  # 10:05am UTC everyday
   push:
     branches:
       - main
     paths-ignore:
-      - '**/README.md'
+      - "**/README.md"
+      - "**/*.md"
+  schedule:
+    # Daily check at 12:15 UTC. It does not build when the release marker exists.
+    - cron: "15 12 * * *"
   workflow_dispatch:
 
 env:
-  IMAGE_REGISTRY: "ghcr.io/${{ github.repository_owner }}"  # do not edit
+  IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}-${{ inputs.brand_name}}-${{ inputs.stream_name }}
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
+  prepare:
+    name: Check latest stable Bazzite release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+
+    outputs:
+      should_build: ${{ steps.decision.outputs.should_build }}
+      release_id: ${{ steps.base.outputs.release_id }}
+      bazzite_image: ${{ steps.base.outputs.bazzite_image }}
+      image_name: ${{ steps.image.outputs.image_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install image inspection tool
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+
+      - name: Read image name
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          source image-template.env
+          image_name="${IMAGE_NAME,,}"
+          echo "image_name=${image_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Inspect current Bazzite GNOME stable image
+        id: base
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          base_name="ghcr.io/ublue-os/bazzite-gnome"
+          skopeo inspect "docker://${base_name}:stable" > /tmp/bazzite.json
+
+          digest="$(jq -r .Digest /tmp/bazzite.json)"
+          base_version="$(jq -r '.Labels["org.opencontainers.image.version"]' /tmp/bazzite.json)"
+
+          if [[ -z "$digest" || "$digest" == null ]]; then
+            echo "Bazzite stable digest is missing."
+            exit 1
+          fi
+
+          if [[ -z "$base_version" || "$base_version" == null ]]; then
+            echo "Bazzite stable version label is missing."
+            exit 1
+          fi
+
+          # Bazzite's build process can expose a trailing .0 in the OCI label
+          # while the stable GitHub release uses the shorter form.
+          release_id="${base_version%.0}"
+          bazzite_image="${base_name}@${digest}"
+
+          echo "Bazzite stable version: ${base_version}"
+          echo "Custom release marker: ${release_id}"
+          echo "Pinned base image: ${bazzite_image}"
+
+          echo "release_id=${release_id}" >> "$GITHUB_OUTPUT"
+          echo "bazzite_image=${bazzite_image}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve latest stable Bazzite GitHub release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          latest="$(gh api repos/ublue-os/bazzite/releases/latest --jq .tag_name)"
+          latest="${latest#stable-}"
+          latest="${latest%.0}"
+
+          echo "Latest stable GitHub release: ${latest}"
+          echo "latest=${latest}" >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether this run should build
+        id: decision
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.image_name }}
+          RELEASE_ID: ${{ steps.base.outputs.release_id }}
+          LATEST_RELEASE: ${{ steps.release.outputs.latest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Pushes, pull requests and manually requested builds always use the
+          # current digest behind Bazzite's stable tag.
+          if [[ "${GITHUB_EVENT_NAME}" != "schedule" ]]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A GitHub release can appear shortly before the stable image tag
+          # finishes moving. Wait for both sources to agree.
+          if [[ "$RELEASE_ID" != "$LATEST_RELEASE" ]]; then
+            echo "GitHub release is ${LATEST_RELEASE}, but the stable GNOME image is ${RELEASE_ID}."
+            echo "The next scheduled run will check again."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          marker_image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}:upstream-${RELEASE_ID}"
+
+          if docker manifest inspect "$marker_image" >/dev/null 2>&1; then
+            echo "Release ${RELEASE_ID} was already built."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Release ${RELEASE_ID} is new for this custom image."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build_push:
-    name: Build and push image
+    name: Build, publish and sign
+    needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
     runs-on: ubuntu-24.04
 
     permissions:
@@ -30,8 +152,12 @@ jobs:
       packages: write
       id-token: write
 
+    env:
+      IMAGE_NAME: ${{ needs.prepare.outputs.image_name }}
+      RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+      BAZZITE_IMAGE: ${{ needs.prepare.outputs.bazzite_image }}
+
     steps:
-      # These stage versions are pinned by https://github.com/renovatebot/renovate
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -39,126 +165,115 @@ jobs:
         uses: ublue-os/remove-unwanted-software@695eb75bc387dbcd9685a8e72d23439d8686cba6
 
       - name: Install just
-        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 #v4.0.0
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
 
-      - name: Check Just Syntax
+      - name: Check Just syntax
+        run: just check
+
+      - name: Read default tag
         shell: bash
         run: |
-          just check
+          set -euo pipefail
+          source image-template.env
+          echo "DEFAULT_TAG=${DEFAULT_TAG}" >> "$GITHUB_ENV"
+          echo "IMAGE_REGISTRY=${IMAGE_REGISTRY,,}" >> "$GITHUB_ENV"
 
-      - name: Image Name
-        id: image-name
+      - name: Build pinned Bazzite stable image
+        shell: bash
         run: |
-          IMAGE_NAME=$(just image_name)
+          set -euo pipefail
 
-          echo "IMAGE_NAME=${IMAGE_NAME}" >> $GITHUB_ENV
+          sudo podman build \
+            --pull=newer \
+            --build-arg "BAZZITE_IMAGE=${BAZZITE_IMAGE}" \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.description=Personal Bazzite GNOME family image" \
+            --label "org.opencontainers.image.version=${RELEASE_ID}" \
+            --label "io.iegorch86.bazzite.release=${RELEASE_ID}" \
+            --tag "${IMAGE_NAME}:${DEFAULT_TAG}" \
+            --file Containerfile \
+            .
 
-      - name: Default Tag
-        id: gen-default-tag
+      - name: Rechunk image for resumable updates
+        shell: bash
         run: |
-          DEFAULT_TAG=$(just generate-default-tag)
-
-          echo "DEFAULT_TAG=${DEFAULT_TAG}" >> $GITHUB_ENV
-
-      - name: Prepare environment
-        run: |
-          # Lowercase the image uri https://github.com/macbre/push-to-ghcr/issues/12
-          echo "IMAGE_REGISTRY=${IMAGE_REGISTRY,,}" >> ${GITHUB_ENV}
-          echo "IMAGE_NAME=${IMAGE_NAME,,}" >> ${GITHUB_ENV}
-
-      # This actually builds the container image
-      - name: Build Image
-        id: build-image
-        run: |
-          sudo -E $(command -v just) build \
-            ${IMAGE_NAME} \
-            ${DEFAULT_TAG}
-
-      # This is optional, this provides smaller delta updates
-      - name: Rechunk with rpm-ostree
-        id: rechunk
-        run: |
-          sudo -E $(command -v just) ostree-rechunk \
-            ${IMAGE_NAME} \
-            ${DEFAULT_TAG}
-
-      # If you are feeling adventurous, use the new distro agnostic rechunker
-      # https://github.com/coreos/chunkah
-      # You can delete the Rechunk with rpm-ostree portion then if you use this
-      #- name: Rechunk with Chunkah
-      #  id: rechunk
-      #  run: |
-      #    sudo -E $(command -v just) rechunk \
-      #      ${IMAGE_NAME} \
-      #      ${DEFAULT_TAG}
-
-      - name: Generate Build Tags
-        id: gen-build-tags
-        run: |
-          alias_tags="$(just generate-build-tags \
-                        ${IMAGE_NAME} \
-                        ${DEFAULT_TAG})"
-
-          echo "Tags for this Action..."
-          echo "${alias_tags}"
-          echo "alias_tags=${alias_tags}" >> $GITHUB_OUTPUT
-
-      - name: Tag Image
-        id: tag-images
-        env:
-          ALIAS_TAGS: ${{ steps.gen-build-tags.outputs.alias_tags }}
-        run: |
-          sudo -E $(command -v just) tag-images \
+          sudo -E just ostree-rechunk \
             "${IMAGE_NAME}" \
-            "${DEFAULT_TAG}" \
-            "${ALIAS_TAGS}"
+            "${DEFAULT_TAG}"
 
-      # These `if` statements are so that pull requests for your custom images do not make it publish any packages under your name without you knowing
-      # They also check if the runner is on the default branch so that things like the merge queue (if you enable it), are going to work
+      - name: Generate image tags
+        id: tags
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          short_sha="${GITHUB_SHA::7}"
+          build_date="$(date -u +%Y%m%d)"
+
+          tags=(
+            "${DEFAULT_TAG}"
+            "upstream-${RELEASE_ID}"
+            "${DEFAULT_TAG}-${build_date}"
+            "${DEFAULT_TAG}-${short_sha}"
+            "${DEFAULT_TAG}-${build_date}-${short_sha}"
+          )
+
+          printf '%s\n' "${tags[@]}" | sort -u > /tmp/image-tags
+          echo "Tags:"
+          cat /tmp/image-tags
+
+      - name: Apply image tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_id="$(sudo podman inspect "${IMAGE_NAME}:${DEFAULT_TAG}" --format '{{.Id}}')"
+
+          while IFS= read -r tag; do
+            sudo podman tag "$image_id" "${IMAGE_NAME}:${tag}"
+          done < /tmp/image-tags
+
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
         if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push To GHCR
+      - name: Push all tags to GHCR
+        id: push
         if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-        id: push-image
-        env:
-          ALIAS_TAGS: ${{ steps.gen-build-tags.outputs.alias_tags }}
+        shell: bash
         run: |
-          set -euox pipefail
-          for tag in ${ALIAS_TAGS}; do
-            sudo -E podman push --digestfile=/tmp/digestfile ${IMAGE_NAME}:${tag} ${IMAGE_REGISTRY}/${IMAGE_NAME}:${tag}
-          done
+          set -euo pipefail
 
-          digest=$(< /tmp/digestfile)
+          while IFS= read -r tag; do
+            sudo podman push \
+              --digestfile=/tmp/digest \
+              "${IMAGE_NAME}:${tag}" \
+              "${IMAGE_REGISTRY}/${IMAGE_NAME}:${tag}"
+          done < /tmp/image-tags
 
-          echo "digest=${digest}" >> $GITHUB_OUTPUT
+          digest="$(cat /tmp/digest)"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "Published digest: ${digest}"
 
-      # This section is optional and only needs to be enabled if you plan on distributing
-      # your project for others to consume. You will need to create a public and private key
-      # using Cosign and save the private key as a repository secret in Github for this workflow
-      # to consume. For more details, review the image signing section of the README.
       - name: Install Cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          # be careful when upgrading major versions
-          cosign-release: 'v3.1.2'
+          cosign-release: v3.1.2
 
-      - name: Sign container image
-        id: sign-image
+      - name: Sign published image digest
         if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         env:
           COSIGN_EXPERIMENTAL: false
           COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
-          DIGEST: ${{ steps.push-image.outputs.digest }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        shell: bash
         run: |
-          # https://github.com/containers/container-libs/issues/388
-          # https://github.com/coreos/rpm-ostree/issues/5509
-          # use old bundle format, so we can use newer cosign 3.X.X instead of 2.X.X
-          cosign sign -y --new-bundle-format=false --use-signing-config=false --key env://COSIGN_PRIVATE_KEY ${IMAGE_REGISTRY}/${IMAGE_NAME}@${DIGEST}
-
+          cosign sign -y \
+            --new-bundle-format=false \
+            --use-signing-config=false \
+            --key env://COSIGN_PRIVATE_KEY \
+            "${IMAGE_REGISTRY}/${IMAGE_NAME}@${DIGEST}"
