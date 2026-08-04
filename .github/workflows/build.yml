@@ -247,8 +247,12 @@ jobs:
         run: |
           set -euo pipefail
 
+          authfile="${DOCKER_CONFIG:-$HOME/.docker}/config.json"
+          test -r "$authfile"
+
           while IFS= read -r tag; do
             sudo podman push \
+              --authfile "$authfile" \
               --digestfile=/tmp/digest \
               "${IMAGE_NAME}:${tag}" \
               "${IMAGE_REGISTRY}/${IMAGE_NAME}:${tag}"
