@@ -148,7 +148,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     permissions:
-      contents: read
+      contents: write
       packages: write
       id-token: write
 
@@ -281,3 +281,60 @@ jobs:
             --use-signing-config=false \
             --key env://COSIGN_PRIVATE_KEY \
             "${IMAGE_REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+      
+      - name: Publish GitHub release
+        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_tag="stable-${RELEASE_ID}"
+
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            echo "GitHub Release ${release_tag} already exists."
+            exit 0
+          fi
+
+          cat > /tmp/release-notes.md <<EOF
+          ## Family Bazzite ${RELEASE_ID}
+
+          Custom Bazzite GNOME image based on the upstream stable Bazzite ${RELEASE_ID} release.
+
+          ### Included customizations
+
+          - Brave Browser installed natively
+          - Gaze face authentication
+          - Pantum M6550NW printer and scanner support
+          - Native KVM/QEMU/libvirt virtualization
+          - virt-manager, virt-install and virt-viewer
+          - Cosign-signed container image
+
+          ### Container images
+
+          Current stable image:
+
+          \`\`\`text
+          ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}:stable
+          \`\`\`
+
+          Release-specific image:
+
+          \`\`\`text
+          ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}:upstream-${RELEASE_ID}
+          \`\`\`
+
+          Published digest:
+
+          \`\`\`text
+          ${DIGEST}
+          \`\`\`
+          EOF
+
+          gh release create "$release_tag" \
+            --target "$GITHUB_SHA" \
+            --title "${RELEASE_ID}: Family Bazzite Stable" \
+            --notes-file /tmp/release-notes.md \
+            --latest  
