@@ -11,7 +11,12 @@ rpm --import https://packages.gundulabs.com/keys/gundulabs-repo.asc
 
 # COPR support is required for the libjpeg8 compatibility package used by
 # the existing Pantum vendor binaries.
-dnf5 install -y dnf5-plugins
+dnf5 install -y \
+    dnf5-plugins \
+    jq
+
+/ctx/install-image-trust.sh \
+    "ghcr.io/iegorch86/family-bazzite"
 
 dnf5 -y copr enable aflyhorse/libjpeg
 
@@ -24,7 +29,6 @@ dnf5 install -y \
     cups \
     cups-client \
     cups-filters \
-    system-config-printer \
     sane-backends \
     sane-backends-drivers-scanners \
     simple-scan \
