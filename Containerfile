@@ -7,6 +7,7 @@ ARG BAZZITE_IMAGE=ghcr.io/ublue-os/bazzite-gnome:stable
 FROM scratch AS ctx
 COPY build_files /
 COPY system_files /system_files
+COPY cosign.pub /cosign.pub
 
 # Normal AMD/Intel Bazzite GNOME desktop image.
 FROM ${BAZZITE_IMAGE}
