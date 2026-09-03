@@ -327,6 +327,7 @@ jobs:
             --new-bundle-format=false \
             --key cosign.pub \
             "${IMAGE_REGISTRY}/${IMAGE_NAME}@${DIGEST}"
+
       - name: Publish GitHub release
         if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         env:
@@ -343,19 +344,120 @@ jobs:
             exit 0
           fi
 
-          cat > /tmp/release-notes.md <<EOF
+          current_packages="/tmp/family-packages.json"
+          previous_packages="/tmp/previous-family-packages.json"
+          package_rows="/tmp/family-package-rows.md"
+          package_notes="/tmp/family-package-notes.md"
+
+          echo '{}' > "$current_packages"
+
+          while IFS= read -r package; do
+            [[ -z "$package" || "$package" == \#* ]] && continue
+
+            version="$(
+              sudo podman run --rm \
+                --entrypoint /usr/bin/rpm \
+                "${IMAGE_NAME}:${DEFAULT_TAG}" \
+                -q --qf '%{VERSION}-%{RELEASE}' "$package" \
+                2>/dev/null || true
+            )"
+
+            if [[ -z "$version" ]]; then
+              echo "Tracked package not installed: ${package}"
+              continue
+            fi
+
+            jq \
+              --arg package "$package" \
+              --arg version "$version" \
+              '. + {($package): $version}' \
+              "$current_packages" > "${current_packages}.new"
+            mv "${current_packages}.new" "$current_packages"
+          done < build_files/release-packages.txt
+
+          previous_release_tag="$(
+            gh api "repos/${GITHUB_REPOSITORY}/releases/latest" \
+              --jq .tag_name 2>/dev/null || true
+          )"
+
+          have_previous=false
+          if [[ -n "$previous_release_tag" ]]; then
+            mkdir -p /tmp/previous-family-release
+            if gh release download "$previous_release_tag" \
+              --pattern family-packages.json \
+              --dir /tmp/previous-family-release >/dev/null 2>&1; then
+              cp /tmp/previous-family-release/family-packages.json "$previous_packages"
+              have_previous=true
+            fi
+          fi
+
+          if [[ "$have_previous" == true ]]; then
+            : > "$package_rows"
+            changes=0
+
+            while IFS= read -r package; do
+              [[ -z "$package" || "$package" == \#* ]] && continue
+
+              previous="$(jq -r --arg package "$package" '.[$package] // empty' "$previous_packages")"
+              current="$(jq -r --arg package "$package" '.[$package] // empty' "$current_packages")"
+
+              [[ "$previous" == "$current" ]] && continue
+
+              if [[ -z "$previous" && -n "$current" ]]; then
+                printf '| ✨ | `%s` |  | `%s` |\n' "$package" "$current" >> "$package_rows"
+              elif [[ -n "$previous" && -z "$current" ]]; then
+                printf '| ❌ | `%s` | `%s` |  |\n' "$package" "$previous" >> "$package_rows"
+              else
+                printf '| 🔄 | `%s` | `%s` | `%s` |\n' "$package" "$previous" "$current" >> "$package_rows"
+              fi
+
+              changes=$((changes + 1))
+            done < build_files/release-packages.txt
+
+            {
+              echo '### Family-layer package changes'
+              echo
+              if [[ "$changes" -eq 0 ]]; then
+                echo 'No tracked Family-layer package versions changed since the previous Family Bazzite release.'
+              else
+                echo '| | Package | Previous | New |'
+                echo '| --- | --- | --- | --- |'
+                cat "$package_rows"
+              fi
+            } > "$package_notes"
+          else
+            {
+              echo '### Family-layer package versions'
+              echo
+              echo 'Initial package-version baseline for automated Family Bazzite changelogs.'
+              echo
+              echo '| Package | Version |'
+              echo '| --- | --- |'
+
+              while IFS= read -r package; do
+                [[ -z "$package" || "$package" == \#* ]] && continue
+                version="$(jq -r --arg package "$package" '.[$package] // empty' "$current_packages")"
+                [[ -z "$version" ]] && continue
+                printf '| `%s` | `%s` |\n' "$package" "$version"
+              done < build_files/release-packages.txt
+            } > "$package_notes"
+          fi
+
+          gh api "repos/ublue-os/bazzite/releases/tags/${RELEASE_ID}" \
+            --jq .body > /tmp/upstream-release.md
+
+          awk '/^### How to rebase$/ { exit } { print }' \
+            /tmp/upstream-release.md > /tmp/upstream-changelog.md
+
+          {
+            cat <<EOF
           ## Family Bazzite ${RELEASE_ID}
 
           Custom Bazzite GNOME image based on the upstream stable Bazzite ${RELEASE_ID} release.
 
-          ### Included customizations
-
-          - Brave Browser installed natively
-          - Gaze face authentication
-          - Pantum M6550NW printer and scanner support
-          - Native KVM/QEMU/libvirt virtualization
-          - virt-manager, virt-install and virt-viewer
-          - Cosign-signed container image
+          EOF
+            cat "$package_notes"
+            cat <<EOF
 
           ### Container images
 
@@ -376,10 +478,23 @@ jobs:
           \`\`\`text
           ${DIGEST}
           \`\`\`
+
+          ---
+
+          ## Upstream Bazzite ${RELEASE_ID} changelog
+
           EOF
+            cat /tmp/upstream-changelog.md
+            cat <<EOF
+
+          > Upstream changelog imported automatically from the corresponding Universal Blue Bazzite release:
+          > https://github.com/ublue-os/bazzite/releases/tag/${RELEASE_ID}
+          EOF
+          } > /tmp/release-notes.md
 
           gh release create "$release_tag" \
+            /tmp/family-packages.json \
             --target "$GITHUB_SHA" \
             --title "${RELEASE_ID}: Family Bazzite Stable" \
             --notes-file /tmp/release-notes.md \
-            --latest  
+            --latest

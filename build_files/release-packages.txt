@@ -1,0 +1,14 @@
+# Family Bazzite packages shown in GitHub release changelogs.
+
+brave-browser
+
+gaze
+gaze-gui
+gaze-gnome-extension
+
+simple-scan
+seahorse
+
+virt-manager
+virt-install
+virt-viewer
