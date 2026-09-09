@@ -1,6 +1,6 @@
 # Family Bazzite
 
-[![Build signed family Bazzite image](https://github.com/iegorch86/family-bazzite/actions/workflows/build.yml/badge.svg)](https://github.com/iegorch86/family-bazzite/actions/workflows/build.yml)
+[![Family Bazzite](https://github.com/iegorch86/family-bazzite/actions/workflows/build.yml/badge.svg)](https://github.com/iegorch86/family-bazzite/actions/workflows/build.yml)
 
 A personal, signed Bazzite GNOME image for the family desktop.
 
